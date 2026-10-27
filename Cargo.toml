@@ -1,0 +1,29 @@
+[package]
+name = "macai"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "A quiet, offline chat app for Apple's on-device Foundation Model"
+publish = false
+
+[[bin]]
+name = "MacAi"
+path = "src/main.rs"
+
+[features]
+screenshot = ["dep:image"]
+
+[dependencies]
+eframe = { version = "=0.31.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+egui_commonmark = { version = "=0.20.0", default-features = false }
+fs2 = "0.4.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
