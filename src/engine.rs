@@ -1,8 +1,9 @@
+use crate::process::ManagedChild;
 use serde_json::Value;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender},
@@ -87,20 +88,6 @@ impl Drop for Generation {
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
                 eprintln!("MacAi: the model worker unexpectedly panicked.");
-            }
-        }
-    }
-}
-
-struct ManagedChild(Child);
-
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        match self.0.try_wait() {
-            Ok(Some(_)) => {}
-            _ => {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
             }
         }
     }
@@ -297,6 +284,11 @@ fn read_stream(
     Ok(full)
 }
 
+pub fn is_license_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("license") || lower.contains("legal notice") || lower.contains("not agreed")
+}
+
 fn explain_failure(diagnostics: &str, status: &str) -> String {
     let lower = diagnostics.to_lowercase();
     let hint = if lower.contains("context")
@@ -310,8 +302,8 @@ fn explain_failure(diagnostics: &str, status: &str) -> String {
         || lower.contains("not enabled")
     {
         "The local model is not ready. Check Apple Intelligence in System Settings, then retry."
-    } else if lower.contains("license") || lower.contains("legal notice") {
-        "The Foundation Models terms need attention. Run `fm license` in Terminal, then retry."
+    } else if is_license_error(diagnostics) {
+        "Apple's Foundation Models terms need attention. Choose Check again in MacAi to review and accept them."
     } else {
         "The local model could not finish this reply. You can retry without losing your previous conversation."
     };
@@ -319,56 +311,6 @@ fn explain_failure(diagnostics: &str, status: &str) -> String {
         format!("{hint}\n\nfm exited with {status}.")
     } else {
         format!("{hint}\n\n{diagnostics}")
-    }
-}
-
-pub fn check_available() -> Result<String, String> {
-    let mut child = ManagedChild(
-        Command::new(FM)
-            .arg("available")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("Cannot run /usr/bin/fm: {error}. macOS 27 is required."))?,
-    );
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("Missing availability output.")?;
-    let stderr = child
-        .0
-        .stderr
-        .take()
-        .ok_or("Missing availability diagnostics.")?;
-    let out = thread::spawn(move || read_diagnostics(stdout));
-    let err = thread::spawn(move || read_diagnostics(stderr));
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.0.try_wait().map_err(|error| error.to_string())? {
-            break status;
-        }
-        if start.elapsed() > Duration::from_secs(15) {
-            return Err(
-                "Checking the local model timed out. Check Apple Intelligence in System Settings."
-                    .into(),
-            );
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
-    let stdout = out
-        .join()
-        .map_err(|_| "Availability reader stopped.")?
-        .map_err(|error| error.to_string())?;
-    let stderr = err
-        .join()
-        .map_err(|_| "Availability diagnostics stopped.")?
-        .map_err(|error| error.to_string())?;
-    if status.success() && stdout.to_lowercase().contains("system model available") {
-        Ok(stdout)
-    } else {
-        Err(format!("Apple Intelligence is not ready. Enable it in System Settings and let the model finish downloading.\n\n{stdout}\n{stderr}"))
     }
 }
 
@@ -508,7 +450,10 @@ printf '{"modelName":"system","transcript":{"ok":true}}' > "$output"
             }
         }
 
-        check_available().unwrap();
+        assert!(matches!(
+            crate::setup::check(&AtomicBool::new(false)).unwrap(),
+            crate::setup::Readiness::Ready
+        ));
         let directory = tempfile::tempdir().unwrap();
         let (store, mut history) = Store::open(directory.path().to_owned()).unwrap();
         let prompt = "Remember this phrase for our conversation: violet otter. Reply with only OK.";

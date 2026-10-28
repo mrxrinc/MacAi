@@ -24,14 +24,28 @@ If you used the earlier bare `MacAi` executable, quit that window first and use
 **Requires:** an Apple Intelligence-capable Mac, macOS 27 with `fm`, and Apple
 Intelligence enabled with its model already downloaded. This build targets Apple
 Silicon. An initial Apple model download or terms acceptance may need to happen
-outside MacAi; chatting afterward is offline.
+before chatting; chatting afterward is offline.
+
+On first launch, MacAi checks Apple's CLI license status. If it has not been
+accepted, a setup window displays the current terms from `fm license --show`.
+Read them, tick the agreement checkbox, and choose **Accept and continue**.
+macOS then asks for **administrator approval** because Apple's agreement applies
+to every user on the Mac. You do not need to open Terminal, and MacAi never sees
+or stores the administrator password. Choosing **Not now** leaves chat disabled
+but still allows browsing existing conversations.
+
+MacAi verifies that the terms have not changed, answers Apple's consent prompt
+through a private pseudo-terminal using macOS's built-in `expect` utility, and
+checks the recorded agreement before enabling chat. It never accepts on startup
+or sends a chat message as an agreement. Changed terms require fresh consent.
+An error or cancelled administrator prompt can be retried from the setup window.
 
 ```sh
 ./dist/MacAi.app/Contents/MacOS/MacAi --check
 ```
 
-If needed, enable Apple Intelligence in System Settings. If `fm` asks for terms
-acceptance, run `fm license` in Terminal; MacAi does not accept terms on your behalf.
+If needed, enable Apple Intelligence in System Settings and wait for its model
+to download, then choose **Check again** in MacAi.
 
 ## Using MacAi
 
@@ -90,9 +104,47 @@ the blue app icon. The same artwork is embedded in the sidebar, welcome screen,
 and replies, so the in-app and Dock icons match. Swift is not needed to run the
 resulting app. Cargo needs internet
 access to download dependencies on the first build, but the built app does not.
-The build script verifies the bundle and applies a local ad-hoc signature, not
-Apple Developer ID notarization. A copy downloaded onto another Mac may be subject
-to Gatekeeper.
+This command creates a **local development build only**, with an ad-hoc signature.
+It is **not notarized** and macOS can block it when downloaded onto another Mac.
+An ad-hoc signature, Apple Development certificate, or App Store distribution
+certificate does not fix that warning.
+
+## Distribute to other Macs
+
+A normal first launch on another Mac requires **Developer ID Application signing
+and Apple notarization**. These require an Apple Developer Program account and a
+valid Developer ID Application certificate with its private key in your keychain.
+The app cannot create that identity or bypass Apple's verification itself.
+
+After installing the certificate, store notarization credentials in Keychain
+using Apple's interactive command (do not put passwords or API keys in this repo):
+
+```sh
+xcrun notarytool store-credentials MacAi-notary
+```
+
+Then create the distributable release:
+
+```sh
+MACAI_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+MACAI_NOTARY_PROFILE='MacAi-notary' \
+sh scripts/release.sh
+```
+
+The script requires the correct certificate, signs with hardened runtime and a
+secure timestamp, submits the app to Apple, waits for an **Accepted** result,
+staples and validates the notarization ticket, and runs a Gatekeeper assessment.
+Only after all steps succeed does it publish **`dist/MacAi.zip`**, containing the
+stapled `MacAi.app`. The stapled ticket allows offline verification on other Macs.
+Notarization logs are kept under `target/notarization/`. Distribute this ZIP,
+not the ad-hoc app produced by `scripts/build.sh`. Do not modify the app bundle
+after signing and notarization.
+
+Building the next local development version replaces `dist/MacAi.app` with an
+ad-hoc build again; the previously published ZIP is not changed. No script disables
+Gatekeeper or removes quarantine attributes.
+
+## Development checks
 
 ```sh
 cargo test --locked
@@ -105,6 +157,10 @@ after its layout settles (and then close it):
 ```sh
 MACAI_SCREENSHOT_TO=/tmp/macai.png cargo run --locked --features screenshot
 ```
+
+For a read-only preview of the first-run terms screen on a Mac where they have
+already been accepted, also set `MACAI_PREVIEW_LICENSE=1`. The preview cannot
+submit an agreement or request administrator approval.
 
 The capture helper is not included in the release build. To exercise real local
 inference and conversation resumption as well as the ordinary tests:

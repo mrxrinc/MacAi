@@ -1,0 +1,47 @@
+set timeout 30
+log_user 0
+set env(NO_COLOR) 1
+set env(TERM) dumb
+set env(LC_ALL) C
+set fm /usr/bin/fm
+set expected "__LICENSE_SHA256__"
+
+if {[catch {exec $fm license --show | /usr/bin/shasum -a 256} checksum]} {
+    puts stderr "Cannot read Apple's current terms: $checksum"
+    exit 1
+}
+if {[lindex $checksum 0] ne $expected} {
+    puts stderr "The license changed. Review the current terms in MacAi before accepting."
+    exit 78
+}
+
+spawn -noecho $fm license
+set answered 0
+expect {
+    -exact {DO YOU AGREE TO THESE TERMS? ANY RESPONSE OTHER THAN 'yes' OR 'y' WILL DISAGREE AND EXIT. [yes, no]} {
+        if {$answered} {
+            close
+            puts stderr "The license command asked for consent more than once."
+            exit 1
+        }
+        set answered 1
+        send -- "yes\r"
+        exp_continue -continue_timer
+    }
+    eof {
+        set result [wait]
+        if {[lindex $result 2] != 0} {
+            puts stderr "Could not read the license command's exit status."
+            exit 1
+        }
+        if {[lindex $result 3] != 0} {
+            puts stderr $expect_out(buffer)
+        }
+        exit [lindex $result 3]
+    }
+    timeout {
+        close
+        puts stderr "The license command timed out. No further answer will be sent."
+        exit 124
+    }
+}

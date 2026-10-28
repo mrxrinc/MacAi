@@ -1,11 +1,12 @@
 use crate::engine::{self, Event, Generation};
 use crate::model::{now, History, Message, MessageStatus, Role};
+use crate::setup::{LicenseDocument, Readiness, SetupTask};
 use crate::storage::Store;
 use eframe::egui::{
     self, Align, Color32, FontId, Frame, Id, Key, Layout, Margin, RichText, Stroke, Vec2,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 const BACKGROUND: Color32 = Color32::from_rgb(247, 249, 251);
@@ -28,8 +29,23 @@ struct Active {
 
 enum ModelState {
     Checking,
+    LicenseRequired,
     Ready,
     Unavailable(String),
+}
+
+struct LicensePrompt {
+    document: LicenseDocument,
+    agreed: bool,
+    open: bool,
+    accepting: bool,
+    error: Option<String>,
+}
+
+impl LicensePrompt {
+    fn can_accept(&self) -> bool {
+        self.open && self.agreed && !self.accepting
+    }
 }
 
 pub struct MacAi {
@@ -41,7 +57,8 @@ pub struct MacAi {
     last_save: Instant,
     active: Option<Active>,
     model: ModelState,
-    availability: Option<Receiver<Result<String, String>>>,
+    setup_task: Option<SetupTask>,
+    license: Option<LicensePrompt>,
     markdown: CommonMarkCache,
     search: String,
     sidebar_open: bool,
@@ -61,7 +78,14 @@ impl MacAi {
         setup_style(&cc.egui_ctx);
         let opened = Store::default_directory().and_then(Store::open);
         let mut app = Self::from_store(opened);
-        app.check_model(&cc.egui_ctx);
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("MACAI_PREVIEW_LICENSE").is_some() {
+            app.finish_setup(crate::setup::preview_license());
+            return app;
+        }
+        if app.fatal.is_none() {
+            app.check_model(&cc.egui_ctx);
+        }
         app
     }
 
@@ -79,7 +103,8 @@ impl MacAi {
             last_save: Instant::now(),
             active: None,
             model: ModelState::Checking,
-            availability: None,
+            setup_task: None,
+            license: None,
             markdown: CommonMarkCache::default(),
             search: String::new(),
             sidebar_open: true,
@@ -96,14 +121,74 @@ impl MacAi {
     }
 
     fn check_model(&mut self, ctx: &egui::Context) {
-        let (sender, receiver) = mpsc::channel();
+        self.setup_task = None;
         let context = ctx.clone();
-        self.availability = Some(receiver);
+        self.license = None;
         self.model = ModelState::Checking;
-        std::thread::spawn(move || {
-            let _ = sender.send(engine::check_available());
+        self.setup_task = Some(SetupTask::check(move || {
             context.request_repaint();
-        });
+        }));
+    }
+
+    fn accept_license(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.license else {
+            return;
+        };
+        if !prompt.can_accept() || self.setup_task.is_some() {
+            return;
+        }
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("MACAI_PREVIEW_LICENSE").is_some() {
+            prompt.error =
+                Some("This setup preview is read-only and cannot accept a license.".into());
+            return;
+        }
+        prompt.accepting = true;
+        prompt.error = None;
+        let document = prompt.document.clone();
+        let context = ctx.clone();
+        self.setup_task = Some(SetupTask::accept(document, move || {
+            context.request_repaint()
+        }));
+    }
+
+    fn finish_setup(&mut self, result: Result<Readiness, String>) {
+        self.setup_task = None;
+        match result {
+            Ok(Readiness::Ready) => {
+                self.model = ModelState::Ready;
+                self.license = None;
+                self.focus_composer = true;
+            }
+            Ok(Readiness::LicenseRequired(document)) => {
+                let changed = self.license.as_ref().is_some_and(|prompt| prompt.accepting);
+                self.model = ModelState::LicenseRequired;
+                self.license = Some(LicensePrompt {
+                    document,
+                    agreed: false,
+                    open: true,
+                    accepting: false,
+                    error: changed.then(|| {
+                        "Apple's terms changed. Please review this version before accepting.".into()
+                    }),
+                });
+                self.focus_composer = false;
+            }
+            Ok(Readiness::ModelUnavailable(error)) => {
+                self.license = None;
+                self.model = ModelState::Unavailable(error);
+            }
+            Err(error) => {
+                if let Some(prompt) = &mut self.license {
+                    prompt.accepting = false;
+                    prompt.agreed = false;
+                    prompt.error = Some(error);
+                    self.model = ModelState::LicenseRequired;
+                } else {
+                    self.model = ModelState::Unavailable(error);
+                }
+            }
+        }
     }
 
     fn save(&mut self) -> bool {
@@ -190,21 +275,13 @@ impl MacAi {
     }
 
     fn receive(&mut self) {
-        if let Some(receiver) = &self.availability {
-            match receiver.try_recv() {
-                Ok(Ok(_)) => {
-                    self.model = ModelState::Ready;
-                    self.availability = None;
-                }
-                Ok(Err(error)) => {
-                    self.model = ModelState::Unavailable(error);
-                    self.availability = None;
-                }
+        if let Some(result) = self.setup_task.as_ref().map(|task| task.events.try_recv()) {
+            match result {
+                Ok(result) => self.finish_setup(result),
                 Err(TryRecvError::Disconnected) => {
-                    self.model = ModelState::Unavailable(
-                        "The model availability check stopped unexpectedly.".into(),
-                    );
-                    self.availability = None;
+                    self.finish_setup(Err(
+                        "The setup check stopped unexpectedly. Please retry.".into()
+                    ));
                 }
                 Err(TryRecvError::Empty) => {}
             }
@@ -249,7 +326,14 @@ impl MacAi {
                         }
                     }
                     Event::Finished { text, transcript } => chat.finish(text, transcript),
-                    Event::Failed(error) => chat.interrupt(MessageStatus::Failed, error),
+                    Event::Failed(error) => {
+                        if engine::is_license_error(&error) {
+                            self.model = ModelState::Unavailable(
+                                "Apple's terms need attention. Choose Check again to review them in MacAi.".into(),
+                            );
+                        }
+                        chat.interrupt(MessageStatus::Failed, error);
+                    }
                     Event::Cancelled => chat.interrupt(
                         MessageStatus::Interrupted,
                         "Reply stopped. This unfinished turn is not included in the model's context.".into(),
@@ -452,6 +536,7 @@ impl MacAi {
                         let (text, color) = match self.model {
                             ModelState::Ready => ("On-device", ACCENT_TEXT),
                             ModelState::Checking => ("Checking model", MUTED),
+                            ModelState::LicenseRequired => ("Setup needed", ACCENT_TEXT),
                             ModelState::Unavailable(_) => ("Model unavailable", ERROR),
                         };
                         ui.label(RichText::new(text).size(11.0).color(color));
@@ -462,6 +547,22 @@ impl MacAi {
     }
 
     fn banners(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if matches!(self.model, ModelState::LicenseRequired) {
+            Frame::new()
+                .fill(SIDEBAR)
+                .corner_radius(8)
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Review Apple's terms to enable local chat. Your saved conversations are still available.").size(12.0));
+                    if ui.small_button("Review terms").clicked() {
+                        if let Some(prompt) = &mut self.license {
+                            prompt.open = true;
+                            prompt.agreed = false;
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+        }
         if let ModelState::Unavailable(error) = &self.model {
             let error = error.clone();
             Frame::new()
@@ -755,6 +856,7 @@ impl MacAi {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.license_dialog(ctx);
         if let Some((id, mut title)) = self.rename.clone() {
             let mut action = None;
             egui::Modal::new(Id::new("rename-dialog")).show(ctx, |ui| {
@@ -836,6 +938,7 @@ impl MacAi {
     }
 
     fn prepare_close(&mut self) -> bool {
+        self.setup_task = None;
         if let Some(active) = self.active.take() {
             let id = active.chat_id.clone();
             drop(active);
@@ -848,6 +951,77 @@ impl MacAi {
             }
         }
         !self.dirty || self.save()
+    }
+
+    fn license_dialog(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.license else {
+            return;
+        };
+        if !prompt.open {
+            return;
+        }
+        let mut accept = false;
+        let mut defer = false;
+        let read_only =
+            cfg!(feature = "screenshot") && std::env::var_os("MACAI_PREVIEW_LICENSE").is_some();
+        egui::Modal::new(Id::new("license-dialog")).show(ctx, |ui| {
+            ui.set_width((ctx.screen_rect().width() - 80.0).clamp(280.0, 600.0));
+            ui.heading("Set up local AI");
+            ui.label(RichText::new("Apple Foundation Models").color(ACCENT_TEXT).size(13.0));
+            ui.add_space(8.0);
+            ui.label(RichText::new("Before your first chat, review Apple's terms below. They are read directly from the fm command installed on this Mac.").size(12.0));
+            Frame::new()
+                .fill(Color32::WHITE)
+                .stroke(Stroke::new(1.0, LINE))
+                .corner_radius(8)
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("license-text")
+                        .max_height((ctx.screen_rect().height() - 350.0).clamp(100.0, 300.0))
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&prompt.document.text).size(12.0)).wrap());
+                        });
+                });
+            if ui.small_button("Copy terms").clicked() {
+                ctx.copy_text(prompt.document.text.clone());
+            }
+            ui.label(RichText::new("This agreement applies to every user on this Mac. After you accept, macOS will ask for administrator approval. MacAi never sees or stores the administrator password.").size(12.0).color(MUTED));
+            ui.add_enabled(
+                !prompt.accepting && !read_only,
+                egui::Checkbox::new(&mut prompt.agreed, "I have read and agree to these terms for this Mac."),
+            );
+            if let Some(error) = &prompt.error {
+                egui::ScrollArea::vertical().id_salt("license-error").max_height(70.0).show(ui, |ui| {
+                    ui.label(RichText::new(error).size(12.0).color(ERROR));
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if prompt.accepting {
+                    ui.spinner();
+                    ui.label(RichText::new("Waiting for administrator approval...").size(12.0));
+                } else {
+                    if ui.button("Not now").clicked() {
+                        defer = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        accept = ui.add_enabled(
+                            prompt.can_accept() && !read_only,
+                            egui::Button::new(RichText::new("Accept and continue").color(ON_ACCENT))
+                                .fill(ACCENT).corner_radius(8),
+                        ).clicked();
+                    });
+                }
+            });
+        });
+        if defer {
+            prompt.open = false;
+            prompt.agreed = false;
+        }
+        if accept {
+            self.accept_license(ctx);
+        }
     }
 
     #[cfg(feature = "screenshot")]
@@ -919,6 +1093,7 @@ impl eframe::App for MacAi {
         if self.rename.is_none()
             && self.delete.is_none()
             && !self.close_confirmation
+            && !self.license.as_ref().is_some_and(|prompt| prompt.open)
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, Key::N))
         {
             self.new_chat();
@@ -1152,6 +1327,107 @@ fn message_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn first_run_app(directory: &std::path::Path) -> MacAi {
+        let mut app = MacAi::from_store(Store::open(directory.to_owned()));
+        app.finish_setup(Ok(Readiness::LicenseRequired(
+            LicenseDocument::new("Apple test terms\n\nRead these terms before accepting.".into())
+                .unwrap(),
+        )));
+        app
+    }
+
+    #[test]
+    fn setup_never_accepts_or_sends_without_explicit_consent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = first_run_app(directory.path());
+        let ctx = egui::Context::default();
+        app.history.selected_mut().draft = "Do not send before consent".into();
+        app.accept_license(&ctx);
+        assert!(app.setup_task.is_none());
+        app.start_message(&ctx, false);
+        assert!(app.active.is_none());
+        assert!(app.history.selected().messages.is_empty());
+        assert_eq!(app.history.selected().draft, "Do not send before consent");
+        let prompt = app.license.as_mut().unwrap();
+        assert!(!prompt.can_accept());
+        prompt.agreed = true;
+        assert!(prompt.can_accept());
+        prompt.open = false;
+        assert!(!prompt.can_accept());
+        app.accept_license(&ctx);
+        assert!(app.setup_task.is_none());
+    }
+
+    #[test]
+    fn approval_errors_allow_retry_and_changed_terms_reset_consent() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = first_run_app(directory.path());
+        app.license.as_mut().unwrap().accepting = true;
+        app.license.as_mut().unwrap().agreed = true;
+        app.finish_setup(Err("Administrator approval was cancelled.".into()));
+        let prompt = app.license.as_ref().unwrap();
+        assert!(!prompt.agreed && !prompt.accepting && prompt.open);
+        assert!(prompt.error.as_ref().unwrap().contains("cancelled"));
+        assert!(matches!(app.model, ModelState::LicenseRequired));
+        app.license.as_mut().unwrap().accepting = true;
+        app.finish_setup(Ok(Readiness::LicenseRequired(
+            LicenseDocument::new("Changed terms".into()).unwrap(),
+        )));
+        assert!(!app.license.as_ref().unwrap().agreed);
+        assert!(app
+            .license
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("changed"));
+        app.finish_setup(Ok(Readiness::ModelUnavailable(
+            "Enable Apple Intelligence".into(),
+        )));
+        assert!(app.license.is_none());
+        assert!(matches!(app.model, ModelState::Unavailable(_)));
+    }
+
+    #[test]
+    fn license_controls_fit_small_windows_with_long_terms() {
+        for size in [[1080.0, 780.0], [760.0, 560.0]] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = first_run_app(directory.path());
+            app.license.as_mut().unwrap().document =
+                LicenseDocument::new("A long license clause for scrolling.\n".repeat(200)).unwrap();
+            let ctx = egui::Context::default();
+            setup_style(&ctx);
+            let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::from(size));
+            for frame in 0..5 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(bounds),
+                        ..Default::default()
+                    },
+                    |ctx| app.license_dialog(ctx),
+                );
+                if frame == 4 {
+                    for label in ["Set up local AI", "Not now", "Accept and continue"] {
+                        let (clip, text) = output
+                            .shapes
+                            .iter()
+                            .find_map(|clipped| {
+                                text_bounds(&clipped.shape, label)
+                                    .map(|rect| (clipped.clip_rect, rect))
+                            })
+                            .unwrap_or_else(|| panic!("Missing control: {label}"));
+                        assert!(
+                            bounds.expand(1.0).contains_rect(text),
+                            "{label} outside {size:?}: {text:?}"
+                        );
+                        assert!(clip.expand(1.0).contains_rect(text), "{label} clipped");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn new_conversation_button_uses_the_bold_font() {

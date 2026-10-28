@@ -23,4 +23,5 @@ codesign --force --sign - "$app"
 codesign --verify --strict --verbose=2 "$app"
 touch "$app"
 
-printf '\nBuilt %s/%s\nDouble-click MacAi.app in Finder, or drag it to Applications.\n' "$PWD" "$app"
+printf '\nBuilt local development app: %s/%s\n' "$PWD" "$app"
+printf 'This ad-hoc-signed build is NOT notarized for distribution to other Macs.\nUse scripts/release.sh for a Gatekeeper-verified release.\n'

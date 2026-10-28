@@ -1,14 +1,26 @@
 mod app;
 mod engine;
 mod model;
+mod process;
+mod setup;
 mod storage;
 
 fn main() -> eframe::Result<()> {
     if let Some(argument) = std::env::args().nth(1) {
         match argument.as_str() {
             "--check" => {
-                match engine::check_available() {
-                    Ok(message) => println!("{message}"),
+                match setup::check(&std::sync::atomic::AtomicBool::new(false)) {
+                    Ok(setup::Readiness::Ready) => {
+                        println!("System model available; Apple terms accepted.")
+                    }
+                    Ok(setup::Readiness::LicenseRequired(_)) => {
+                        eprintln!("Apple's terms have not been accepted. Open MacAi to review and accept them in the setup screen.");
+                        std::process::exit(1);
+                    }
+                    Ok(setup::Readiness::ModelUnavailable(error)) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
                     Err(error) => {
                         eprintln!("{error}");
                         std::process::exit(1);
