@@ -473,7 +473,13 @@ impl MacAi {
                         }
                     });
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                    ui.add_space(5.0);
+                    
+                    ui.add_space(3.0);
+                    ui.label(
+                        RichText::new("mrxrinc")
+                            .size(10.0)
+                            .color(MUTED),
+                    );
                     ui.label(
                         RichText::new("No cloud. No account. Just your Mac.")
                             .size(10.0)
