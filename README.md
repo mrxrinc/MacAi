@@ -1,5 +1,7 @@
 # MacAi
 
+![MacAi demo](assets/MacAi_Screenshot.png)
+
 A small, native macOS chat app for Apple's Foundation Models. It uses the
 on-device model by default, so chats stay on your Mac and work offline. Written in
 Rust. You don't need Python, a browser, an account or an API key, and the model
@@ -139,8 +141,8 @@ works; only the optional Apple Cloud model is affected (see below).
   choice for new conversations. A conversation's context belongs to the model that
   started it, so switching models in a conversation that already has messages
   starts a fresh conversation and moves your unsent draft into it.
-- Apple currently reports Private Cloud Compute as *"not available in this context.
-  Please use the Terminal app."* for apps other than Terminal. When that happens,
+- Apple currently reports Private Cloud Compute as _"not available in this context.
+  Please use the Terminal app."_ for apps other than Terminal. When that happens,
   MacAi hides the Apple Cloud switch and its notice (the code is commented out in
   `src/app.rs`, ready to re-enable) and keeps everything on-device. Conversations
   saved on Apple Cloud stay readable; sending in one continues in a new on-device
