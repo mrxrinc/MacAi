@@ -1,57 +1,114 @@
 # MacAi
 
 A small, native macOS chat app for Apple's Foundation Models. It uses the
-on-device model by default and can optionally switch to Apple's Private Cloud
-Compute model. Written in Rust; no Python runtime, browser, web server, account,
-or API key.
+on-device model by default, so chats stay on your Mac and work offline. Written in
+Rust. You don't need Python, a browser, an account or an API key, and the model
+isn't bundled: MacAi talks to Apple's built-in `/usr/bin/fm` command.
 
-## Run
+## Build it yourself (on a brand-new Mac)
 
-Double-click **`dist/MacAi.app`** in Finder. It opens directly as a normal Mac app,
-with its own icon in the Dock and **no Terminal window**. You can also drag it to
-Applications or launch it with:
+These steps take you from a fresh Mac to a working `MacAi.app`. Run the commands
+in **Terminal** (Applications > Utilities).
 
-```sh
-open dist/MacAi.app
-```
+1. **Check your Mac.** You need:
+   - an Apple Silicon Mac,
+   - macOS 27 or newer, which includes Apple's `fm` command,
+   - Apple Intelligence turned on in **System Settings**, with its model fully
+     downloaded.
 
-Finder displays `MacAi.app` as one movable item. Like other macOS apps, it is
-technically a bundle containing the self-contained Rust executable, its icon,
-and macOS application metadata. There is no installer or extra runtime.
-It uses macOS's `/usr/bin/fm`; the model is supplied by Apple, not bundled in the app.
+   This should list `system` with a ✓:
 
-If you used the earlier bare `MacAi` executable, quit that window first and use
-`MacAi.app` from now on. Your existing chats and drafts are preserved automatically.
+   ```sh
+   /usr/bin/fm models
+   ```
 
-**Requires:** an Apple Intelligence-capable Mac, macOS 27 with `fm`, and Apple
-Intelligence enabled with its model already downloaded. This build targets Apple
-Silicon. An initial Apple model download or terms acceptance may need to happen
-before chatting; on-device chatting afterward is offline.
+2. **Install Apple's Command Line Tools.** These provide `git`, `swift`,
+   `iconutil`, `codesign` and `plutil`, which the build uses. Then follow the
+   dialog that appears:
 
-On macOS 27.2, `fm models` also checks Private Cloud Compute (`pcc`). MacAi
-only needs the on-device `system` model; `pcc` being unavailable does not block
-local chat. It only affects the optional **Apple Cloud** model (see below).
+   ```sh
+   xcode-select --install
+   ```
 
-On first launch, MacAi checks Apple's CLI license status. If it has not been
-accepted, a setup window displays the current terms from `fm license --show`.
-Read them, tick the agreement checkbox, and choose **Accept and continue**.
-macOS then asks for **administrator approval** because Apple's agreement applies
-to every user on the Mac. You do not need to open Terminal, and MacAi never sees
-or stores the administrator password. Choosing **Not now** leaves chat disabled
-but still allows browsing existing conversations.
+3. **Install Rust** with the official installer, [rustup](https://rustup.rs),
+   and accept the defaults:
 
-MacAi verifies that the terms have not changed, answers Apple's consent prompt
-through a private pseudo-terminal using macOS's built-in `expect` utility, and
-checks the recorded agreement before enabling chat. It never accepts on startup
-or sends a chat message as an agreement. Changed terms require fresh consent.
-An error or cancelled administrator prompt can be retried from the setup window.
+   ```sh
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
 
-```sh
-./dist/MacAi.app/Contents/MacOS/MacAi --check
-```
+   Open a **new** Terminal window, then check that the version is 1.86 or newer:
 
-If needed, enable Apple Intelligence in System Settings and wait for its model
-to download, then choose **Check again** in MacAi.
+   ```sh
+   cargo --version
+   ```
+
+4. **Get the code:**
+
+   ```sh
+   git clone https://github.com/mrxrinc/MacAi.git
+   cd MacAi
+   ```
+
+5. **Build the app.** The first build downloads Rust packages, so it needs
+   internet and takes a few minutes. Later builds are faster.
+
+   ```sh
+   sh scripts/build.sh
+   ```
+
+6. **Open it:**
+
+   ```sh
+   open dist/MacAi.app
+   ```
+
+   You can also double-click `dist/MacAi.app` in Finder or drag it to
+   Applications. On first launch, MacAi shows Apple's terms for the `fm` tool.
+   Read and accept them (see [First launch](#first-launch)), then start chatting.
+
+> **This build works only on the Mac that built it.** `scripts/build.sh` signs the
+> app ad hoc and doesn't notarize it, so macOS may block it if you copy it to
+> another Mac. To share MacAi, see [Distribute to other Macs](#distribute-to-other-macs).
+
+### Troubleshooting
+
+- **`swift`, `iconutil` or `git`: command not found**, or a prompt asks to install
+  developer tools. Finish step 2 (`xcode-select --install`), then run the build
+  again.
+- **`cargo: command not found`.** Open a new Terminal window after installing
+  Rust, or run `. "$HOME/.cargo/env"`.
+- **Rust is too old** (an error mentions `rust-version` or 1.86). Run
+  `rustup update`.
+- **`fm` is missing, or MacAi says Apple Intelligence isn't ready.** Make sure
+  you're on macOS 27, turn on Apple Intelligence in System Settings, and wait for
+  its model to download. Then choose **Check again** in MacAi, or run:
+
+  ```sh
+  ./dist/MacAi.app/Contents/MacOS/MacAi --check
+  ```
+
+- **macOS says MacAi "can't be opened" or can't be verified.** This happens
+  when the app was built on a different Mac. Build it on this Mac with the steps
+  above, or use a notarized release.
+
+## First launch
+
+MacAi checks whether Apple's `fm` terms have been accepted. If not, it shows the
+current terms from `fm license --show`. Tick the checkbox and choose **Accept and
+continue**. macOS then asks for **administrator approval**, because the agreement
+applies to every user on the Mac. MacAi never sees or stores your password.
+**Not now** keeps chat turned off, but you can still browse saved conversations.
+
+MacAi records consent only through that button: it never accepts on startup or
+treats a chat message as consent. It checks that the terms haven't changed, answers Apple's
+prompt through a private pseudo-terminal using macOS's built-in `expect`, and confirms the recorded agreement before turning chat on. If the terms change,
+it asks again. If something goes wrong or you cancel the administrator prompt,
+you can try again from the setup window.
+
+MacAi only needs the on-device `system` model. On macOS 27.2, `fm models` also
+lists Private Cloud Compute (`pcc`). If `pcc` is unavailable, local chat still
+works; only the optional Apple Cloud model is affected (see below).
 
 ## Using MacAi
 
@@ -65,9 +122,10 @@ to download, then choose **Check again** in MacAi.
   title you renamed is never replaced.
 - Replies stream as they are generated. **Stop reply** cancels the local process;
   **Retry reply** retries a stopped or failed message.
-- Each conversation in the sidebar has a `...` button (shown on hover and on the
-  selected chat) to rename or delete it. The header's `...` menu does the same for the
-  selected conversation. Deletion asks for confirmation. Copy buttons copy messages; replies support Markdown and code blocks.
+- Each conversation in the sidebar has a `...` button, shown on hover and on the
+  selected chat, to rename or delete it. The header's `...` menu does the same for
+  the open conversation. Deleting asks for confirmation.
+- Copy buttons copy messages. Replies support Markdown and code blocks.
 - MacAi follows the macOS light or dark appearance by default. Open
   **MacAi > Settings…** (Command+,) to choose System, Light or Dark; the choice is saved.
 - Drafts, conversation selection, messages, and model context are saved automatically.
@@ -98,14 +156,12 @@ to download, then choose **Check again** in MacAi.
 
 ## Privacy and storage
 
-MacAi invokes `fm respond --model system` (or `--model pcc` for Apple Cloud)
-directly, passing prompts through stdin. Like running `fm respond` in Terminal,
-it adds no extra system instructions, so replies match what the terminal gives
-you. On-device chats stay on your Mac; Apple Cloud chats are processed by Apple's
-Private Cloud Compute.
-It uses `--resume` and `--save-transcript` to retain the same model context between
-turns and app launches. There is no network listener, telemetry, remote image
-fetching, or automatic link opening.
+MacAi runs `fm respond --model system` (or `--model pcc` for Apple Cloud) and
+passes your prompt through stdin. It adds no extra instructions, so replies match
+what `fm respond` gives you in Terminal. It uses `--resume` and `--save-transcript`
+to keep the model's context between turns and app launches. On-device chats stay on
+your Mac; Apple Cloud chats are processed by Apple's Private Cloud Compute. There is
+no network listener, telemetry, remote image loading or automatic link opening.
 
 Everything is stored under:
 
@@ -115,39 +171,30 @@ Everything is stored under:
     history.lock
 ```
 
-History is **local plaintext, not encrypted**, in an owner-only folder with an
-owner-readable/writable history file. Normal macOS backups may include it. Saves
-are atomic; another MacAi instance cannot overwrite the same history. Unreadable
-or unsupported history is reported rather than silently replaced. Temporary
-model transcripts are kept in private subfolders here and removed after each
-request. A force-kill or power loss can leave a `.generation-*` folder; it is safe
-to remove such folders when MacAi is closed.
+History is **plain text, not encrypted**. The folder is owner-only and the history
+file is readable and writable only by you. Normal macOS backups may include it.
+Saves are atomic, and a second MacAi instance can't overwrite the same history.
+Unreadable or unsupported history is reported, never silently replaced. Temporary
+model transcripts live in private subfolders here and are removed after each
+request. A force-quit or power loss can leave a `.generation-*` folder behind; it's
+safe to delete while MacAi is closed.
 
-Existing `fm chat` sessions in `~/.fm/sessions/` are not imported or modified.
-Stopped or failed turns remain visible, but are **not** added to the model's
-context; retries use the last successfully completed turn. Apple's model has a
-finite context window and safety rules. When a conversation gets too long, MacAi
-shows the model's error and asks you to start a new conversation rather than
-silently discarding earlier context.
+MacAi doesn't import or change `fm chat` sessions in `~/.fm/sessions/`. Stopped or
+failed replies stay visible but are **not** added to the model's context; retries
+continue from the last completed turn. Apple's model has a limited context window
+and safety rules. If a conversation gets too long, MacAi shows the model's error and
+suggests a new conversation rather than silently dropping earlier context.
 
-## Build
+## How the build works
 
-With Rust 1.86 or newer and Xcode Command Line Tools:
+`scripts/build.sh` generates the app icon with `swift` and `iconutil`, builds the
+Rust app in release mode, and assembles and ad-hoc signs **`dist/MacAi.app`**. The
+same artwork is used for the Dock icon and inside the app. Swift is needed only to
+build MacAi, not to run it.
 
-```sh
-sh scripts/build.sh
-```
-
-The result is the Finder-ready **`dist/MacAi.app`**. The build uses the Swift/AppKit
-and `iconutil` tools included with macOS and Xcode Command Line Tools to generate
-the blue app icon. The same artwork is embedded in the sidebar, welcome screen,
-and replies, so the in-app and Dock icons match. Swift is not needed to run the
-resulting app. Cargo needs internet
-access to download dependencies on the first build, but the built app does not.
-This command creates a **local development build only**, with an ad-hoc signature.
-It is **not notarized** and macOS can block it when downloaded onto another Mac.
-An ad-hoc signature, Apple Development certificate, or App Store distribution
-certificate does not fix that warning.
+The result is a **local development build**. It isn't notarized, so macOS can block
+it on other Macs. Neither an ad-hoc signature nor an Apple Development or App Store
+certificate fixes that.
 
 ## Distribute to other Macs
 
