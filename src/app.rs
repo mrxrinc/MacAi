@@ -166,6 +166,7 @@ pub struct MacAi {
     focus_composer: bool,
     rename: Option<(String, String)>,
     delete: Option<String>,
+    settings_open: bool,
     close_confirmation: bool,
     allow_close: bool,
     ime_active: bool,
@@ -180,6 +181,7 @@ impl MacAi {
         let opened = Store::default_directory().and_then(Store::open);
         let mut app = Self::from_store(opened);
         apply_appearance(&cc.egui_ctx, app.history.appearance);
+        crate::menu::install(&cc.egui_ctx);
         #[cfg(feature = "screenshot")]
         if std::env::var_os("MACAI_PREVIEW_LICENSE").is_some() {
             app.finish_setup(crate::setup::preview_license());
@@ -218,6 +220,7 @@ impl MacAi {
             focus_composer: true,
             rename: None,
             delete: None,
+            settings_open: false,
             close_confirmation: false,
             allow_close: false,
             ime_active: false,
@@ -406,6 +409,7 @@ impl MacAi {
             || self.save_error.is_some()
             || self.rename.is_some()
             || self.delete.is_some()
+            || self.settings_open
             || self.close_confirmation
             || !matches!(self.model, ModelState::Ready)
         {
@@ -705,12 +709,15 @@ impl MacAi {
                                 .inner_margin(Margin::symmetric(10, 10))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&title).size(13.0).color(pal().ink),
-                                        )
-                                        .truncate(),
-                                    );
+                                    ui.scope(|ui| {
+                                        ui.set_max_width(ui.available_width() - ROW_MENU_SPACE);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&title).size(13.0).color(pal().ink),
+                                            )
+                                            .truncate(),
+                                        );
+                                    });
                                     ui.add_space(4.0);
                                     ui.label(
                                         RichText::new(if busy {
@@ -728,6 +735,17 @@ impl MacAi {
                                 Id::new(("chat", &id)),
                                 egui::Sense::click(),
                             );
+                            let menu_id = Id::new(("chat-menu", &id));
+                            let menu_open = ui.memory(|memory| memory.is_popup_open(menu_id));
+                            if selected || menu_open || ui.rect_contains_pointer(response.rect) {
+                                match chat_row_menu(ui, response.rect, menu_id, busy) {
+                                    Some(RowAction::Rename) => {
+                                        self.rename = Some((id.clone(), title.clone()));
+                                    }
+                                    Some(RowAction::Delete) => self.delete = Some(id.clone()),
+                                    None => {}
+                                }
+                            }
                             if click.clicked() {
                                 self.history.selected = id;
                                 self.dirty = true;
@@ -796,15 +814,6 @@ impl MacAi {
                             {
                                 self.delete = Some(self.history.selected.clone());
                                 ui.close_menu();
-                            }
-                            ui.separator();
-                            ui.label(RichText::new("Appearance").size(11.0).color(pal().muted));
-                            for appearance in Appearance::ALL {
-                                let chosen = self.history.appearance == appearance;
-                                if ui.radio(chosen, appearance.label()).clicked() && !chosen {
-                                    self.set_appearance(ctx, appearance);
-                                    ui.close_menu();
-                                }
                             }
                         });
                         let selected_model = self.history.selected().model;
@@ -1256,6 +1265,7 @@ impl MacAi {
             });
             if let Some(delete) = action {
                 if delete {
+                    self.titles.retain(|task| task.chat_id != id);
                     self.history.delete(&id);
                     self.dirty = true;
                     self.save();
@@ -1263,6 +1273,9 @@ impl MacAi {
                 }
                 self.delete = None;
             }
+        }
+        if self.settings_open {
+            self.settings_dialog(ctx);
         }
         if self.close_confirmation {
             egui::Modal::new(Id::new("unsaved-dialog")).show(ctx, |ui| {
@@ -1280,6 +1293,84 @@ impl MacAi {
                     }
                 });
             });
+        }
+    }
+
+    fn handle_menu_requests(&mut self) {
+        if crate::menu::take_settings_request() {
+            self.settings_open = true;
+        }
+    }
+
+    fn settings_dialog(&mut self, ctx: &egui::Context) {
+        let mut chosen = None;
+        let mut done = false;
+        let modal = egui::Modal::new(Id::new("settings-dialog"))
+            .frame(
+                Frame::popup(&ctx.style())
+                    .fill(pal().surface)
+                    .corner_radius(12)
+                    .inner_margin(Margin::same(24)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(3.0 * APPEARANCE_CARD.x + 2.0 * 12.0);
+                ui.label(
+                    RichText::new("Settings")
+                        .size(18.0)
+                        .strong()
+                        .color(pal().ink),
+                );
+                ui.add_space(18.0);
+                ui.label(
+                    RichText::new("APPEARANCE")
+                        .size(10.0)
+                        .strong()
+                        .color(pal().muted),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for appearance in Appearance::ALL {
+                        if appearance_card(ui, appearance, self.history.appearance == appearance)
+                            .clicked()
+                        {
+                            chosen = Some(appearance);
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(match self.history.appearance {
+                        Appearance::System => "MacAi follows your Mac's light or dark appearance.",
+                        Appearance::Light => "MacAi always uses the light appearance.",
+                        Appearance::Dark => "MacAi always uses the dark appearance.",
+                    })
+                    .size(12.0)
+                    .color(pal().muted),
+                );
+                ui.add_space(20.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Done").color(pal().on_accent))
+                                .fill(pal().accent_fill)
+                                .corner_radius(7)
+                                .min_size(Vec2::new(72.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        done = true;
+                    }
+                });
+            });
+        if let Some(appearance) = chosen {
+            if appearance != self.history.appearance {
+                self.set_appearance(ctx, appearance);
+            }
+        }
+        if done || modal.should_close() {
+            self.settings_open = false;
+            self.focus_composer = true;
         }
     }
 
@@ -1395,6 +1486,15 @@ impl MacAi {
                 return;
             }
         }
+        if ctx.cumulative_pass_nr() == 3 {
+            if std::env::var_os("MACAI_SCREENSHOT_SETTINGS").is_some() {
+                crate::menu::choose_settings_for_screenshot();
+            }
+            if std::env::var_os("MACAI_SCREENSHOT_ROW_MENU").is_some() {
+                let id = Id::new(("chat-menu", &self.history.selected));
+                ctx.memory_mut(|memory| memory.open_popup(id));
+            }
+        }
         if ctx.cumulative_pass_nr() >= 8 && !self.capture_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             self.capture_requested = true;
@@ -1439,8 +1539,10 @@ impl eframe::App for MacAi {
             });
             return;
         }
+        self.handle_menu_requests();
         if self.rename.is_none()
             && self.delete.is_none()
+            && !self.settings_open
             && !self.close_confirmation
             && !self.license.as_ref().is_some_and(|prompt| prompt.open)
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, Key::N))
@@ -1676,6 +1778,165 @@ fn repeat_notice(ui: &mut egui::Ui) -> Option<Turn> {
 }
 
 /// A borderless chevron button: it points left to hide the sidebar and right to show it.
+const ROW_MENU_SPACE: f32 = 26.0;
+const APPEARANCE_CARD: Vec2 = Vec2::new(116.0, 92.0);
+
+/// A selectable card with a small window preview for one appearance choice.
+fn appearance_card(ui: &mut egui::Ui, appearance: Appearance, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(APPEARANCE_CARD, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::RadioButton,
+            true,
+            selected,
+            appearance.label(),
+        )
+    });
+    let painter = ui.painter();
+    let border = if selected {
+        Stroke::new(2.0_f32, pal().accent)
+    } else if response.hovered() {
+        Stroke::new(1.0_f32, pal().muted)
+    } else {
+        Stroke::new(1.0_f32, pal().line)
+    };
+    painter.rect(
+        rect,
+        10.0,
+        if response.hovered() {
+            pal().hover
+        } else {
+            pal().card
+        },
+        border,
+        egui::StrokeKind::Inside,
+    );
+    let preview = egui::Rect::from_min_size(
+        rect.min + Vec2::new(14.0, 12.0),
+        Vec2::new(rect.width() - 28.0, 46.0),
+    );
+    let mini = |painter: &egui::Painter, area: egui::Rect, palette: &Palette| {
+        painter.rect_filled(area, 0.0, palette.background);
+        let side =
+            egui::Rect::from_min_size(area.min, Vec2::new(area.width() * 0.3, area.height()));
+        painter.rect_filled(side, 0.0, palette.sidebar);
+        let bubble = egui::Rect::from_min_size(
+            egui::pos2(area.right() - 30.0, area.top() + 8.0),
+            Vec2::new(22.0, 8.0),
+        );
+        painter.rect_filled(bubble, 4.0, palette.user_bubble);
+        let line = egui::Rect::from_min_size(
+            egui::pos2(side.right() + 6.0, area.top() + 22.0),
+            Vec2::new(area.right() - side.right() - 14.0, 4.0),
+        );
+        painter.rect_filled(line, 2.0, palette.faint);
+        let pill = egui::Rect::from_min_size(
+            egui::pos2(side.left() + 4.0, area.top() + 6.0),
+            Vec2::new(side.width() - 8.0, 6.0),
+        );
+        painter.rect_filled(pill, 3.0, palette.accent_fill);
+    };
+    let clipped = painter.with_clip_rect(preview);
+    match appearance {
+        Appearance::Light => mini(&clipped, preview, &LIGHT),
+        Appearance::Dark => mini(&clipped, preview, &DARK),
+        Appearance::System => {
+            mini(&clipped, preview, &LIGHT);
+            let mut right = preview;
+            right.min.x = preview.center().x;
+            mini(&painter.with_clip_rect(right), preview, &DARK);
+        }
+    }
+    painter.rect_stroke(
+        preview,
+        5.0,
+        Stroke::new(1.0_f32, pal().line),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.bottom() - 16.0),
+        egui::Align2::CENTER_CENTER,
+        appearance.label(),
+        FontId::proportional(13.0),
+        if selected {
+            pal().accent_text
+        } else {
+            pal().ink
+        },
+    );
+    response
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowAction {
+    Rename,
+    Delete,
+}
+
+/// The "..." button in a sidebar chat row, with its Rename / Delete popup.
+fn chat_row_menu(ui: &mut egui::Ui, row: egui::Rect, menu_id: Id, busy: bool) -> Option<RowAction> {
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(row.right() - 8.0 - 11.0, row.top() + 19.0),
+        Vec2::splat(22.0),
+    );
+    let response = ui
+        .interact(rect, menu_id.with("button"), egui::Sense::click())
+        .on_hover_text("Conversation options");
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Conversation options")
+    });
+    let open = ui.memory(|memory| memory.is_popup_open(menu_id));
+    if response.hovered() || open {
+        ui.painter().rect_filled(rect, 6.0, pal().hover);
+    }
+    let color = if response.hovered() || open {
+        pal().ink
+    } else {
+        pal().muted
+    };
+    for offset in [-5.0, 0.0, 5.0] {
+        ui.painter()
+            .circle_filled(rect.center() + Vec2::new(offset, 0.0), 1.6, color);
+    }
+    if response.clicked() {
+        ui.memory_mut(|memory| memory.toggle_popup(menu_id));
+    }
+    let mut action = None;
+    egui::popup::popup_below_widget(
+        ui,
+        menu_id,
+        &response,
+        egui::PopupCloseBehavior::CloseOnClick,
+        |ui| {
+            ui.set_min_width(140.0);
+            let widgets = &mut ui.visuals_mut().widgets;
+            widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            widgets.inactive.bg_stroke = Stroke::NONE;
+            widgets.hovered.weak_bg_fill = pal().hover;
+            widgets.hovered.bg_stroke = Stroke::NONE;
+            widgets.active.bg_stroke = Stroke::NONE;
+            ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
+                if ui.button("Rename").clicked() {
+                    action = Some(RowAction::Rename);
+                }
+                if ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(RichText::new("Delete chat").color(pal().error)),
+                    )
+                    .on_disabled_hover_text("Stop the reply before deleting this chat.")
+                    .clicked()
+                {
+                    action = Some(RowAction::Delete);
+                }
+            });
+        },
+    );
+    action
+}
+
 fn sidebar_toggle(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let label = if open {
         "Hide conversations"
@@ -2319,6 +2580,172 @@ printf 'Fresh answer to %s\n' "$prompt"
         assert_eq!(history.appearance, Appearance::Dark);
         apply_appearance(&ctx, Appearance::Light);
         assert_eq!(ctx.style().visuals.panel_fill, LIGHT.background);
+    }
+
+    fn ui_frame(
+        app: &mut MacAi,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1080.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                app.sidebar(ctx);
+                app.header(ctx);
+                app.composer(ctx);
+                app.conversation(ctx);
+                app.dialogs(ctx);
+            },
+        );
+        ctx.request_repaint();
+        output
+    }
+
+    fn click(app: &mut MacAi, ctx: &egui::Context, pos: egui::Pos2) -> egui::FullOutput {
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        ui_frame(app, ctx, vec![egui::Event::PointerMoved(pos), press(true)]);
+        ui_frame(app, ctx, vec![press(false)]);
+        ui_frame(app, ctx, vec![])
+    }
+
+    fn find_text(output: &egui::FullOutput, text: &str) -> Option<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| text_bounds(&clipped.shape, text))
+    }
+
+    fn row_menu_dots(output: &egui::FullOutput) -> Vec<egui::Pos2> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<egui::Pos2>) {
+            match shape {
+                egui::Shape::Circle(circle) if circle.radius == 1.6 => found.push(circle.center),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn sidebar_row_menu_renames_and_deletes_chats_with_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = MacAi::from_store(Store::open(directory.path().to_owned()));
+        app.history.selected_mut().title = "Kept chat".into();
+        app.history.selected_mut().updated_at = 10;
+        let kept = app.history.selected.clone();
+        app.history.chats.push(crate::model::Chat::new());
+        app.history.selected = app.history.chats[1].id.clone();
+        app.history.selected_mut().title = "Doomed chat".into();
+        app.history.selected_mut().updated_at = 20;
+        let doomed = app.history.selected.clone();
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+
+        let output = ui_frame(&mut app, &ctx, vec![]);
+        let dots = row_menu_dots(&output);
+        assert_eq!(
+            dots.len(),
+            3,
+            "only the selected, unhovered row shows its button"
+        );
+        let button = dots[1];
+
+        let output = click(&mut app, &ctx, button);
+        let rename = find_text(&output, "Rename").expect("menu offers Rename");
+        assert!(find_text(&output, "Delete chat").is_some());
+        click(&mut app, &ctx, rename.center());
+        assert_eq!(app.rename, Some((doomed.clone(), "Doomed chat".into())));
+        app.rename = None;
+
+        // Let the closed rename modal leave the previous frame's hit-test layers.
+        ui_frame(&mut app, &ctx, vec![]);
+        let output = click(&mut app, &ctx, button);
+        let delete = find_text(&output, "Delete chat").unwrap();
+        let output = click(&mut app, &ctx, delete.center());
+        assert_eq!(
+            app.delete,
+            Some(doomed.clone()),
+            "deletion waits for confirmation"
+        );
+        assert_eq!(app.history.chats.len(), 2);
+        let confirm = find_text(&output, "Delete conversation").expect("confirmation dialog");
+        click(&mut app, &ctx, confirm.center());
+        assert!(app.delete.is_none());
+        assert_eq!(app.history.selected, kept);
+        assert!(app.history.chats.iter().all(|chat| chat.id != doomed));
+        drop(app);
+        let (_, history) = Store::open(directory.path().to_owned()).unwrap();
+        assert_eq!(history.chats.len(), 1, "deletion is saved");
+        assert_eq!(history.selected, kept);
+    }
+
+    #[test]
+    fn settings_menu_item_opens_appearance_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = MacAi::from_store(Store::open(directory.path().to_owned()));
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+
+        let output = ui_frame(&mut app, &ctx, vec![]);
+        let menu = find_text(&output, "...").unwrap();
+        let output = click(&mut app, &ctx, menu.center());
+        assert!(find_text(&output, "Rename conversation").is_some());
+        assert!(
+            find_text(&output, "Appearance").is_none(),
+            "Appearance moved to Settings"
+        );
+        ui_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+
+        crate::menu::request_settings();
+        app.handle_menu_requests();
+        assert!(app.settings_open);
+        assert!(
+            !crate::menu::take_settings_request(),
+            "each request opens Settings once"
+        );
+        // A newly shown modal is laid out invisibly on its first frame.
+        ui_frame(&mut app, &ctx, vec![]);
+        let output = ui_frame(&mut app, &ctx, vec![]);
+        for label in ["Settings", "APPEARANCE", "System", "Light", "Dark", "Done"] {
+            assert!(find_text(&output, label).is_some(), "Missing {label}");
+        }
+        let dark = find_text(&output, "Dark").unwrap();
+        click(&mut app, &ctx, dark.center());
+        assert_eq!(app.history.appearance, Appearance::Dark);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        let output = ui_frame(&mut app, &ctx, vec![]);
+        let done = find_text(&output, "Done").unwrap();
+        click(&mut app, &ctx, done.center());
+        assert!(!app.settings_open);
+        drop(app);
+        let (_, history) = Store::open(directory.path().to_owned()).unwrap();
+        assert_eq!(history.appearance, Appearance::Dark);
     }
 
     #[test]

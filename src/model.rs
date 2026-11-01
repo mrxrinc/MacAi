@@ -322,7 +322,10 @@ impl History {
             self.chats.push(Chat::new());
         }
         if !self.chats.iter().any(|chat| chat.id == self.selected) {
-            self.selected = self.chats[0].id.clone();
+            // Move to the conversation now at the top of the sidebar.
+            if let Some(latest) = self.chats.iter().max_by_key(|chat| chat.updated_at) {
+                self.selected = latest.id.clone();
+            }
         }
     }
 
@@ -387,6 +390,27 @@ mod tests {
         assert!(history.selected().messages.is_empty());
         history.new_chat();
         assert_eq!(history.chats.len(), 1);
+    }
+
+    #[test]
+    fn deleting_the_selected_chat_selects_the_most_recent_one() {
+        let mut history = History::default();
+        let mut older = Chat::new();
+        older.updated_at = 10;
+        let mut newer = Chat::new();
+        newer.updated_at = 20;
+        let (older_id, newer_id) = (older.id.clone(), newer.id.clone());
+        history.chats.extend([older, newer]);
+        let first = history.selected.clone();
+        history.delete(&newer_id);
+        assert_eq!(
+            history.selected, first,
+            "deleting another chat keeps the selection"
+        );
+        history.selected = older_id.clone();
+        history.delete(&older_id);
+        assert_eq!(history.selected, first);
+        assert!(history.chats.iter().all(|chat| chat.id != older_id));
     }
 
     #[test]

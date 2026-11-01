@@ -1,5 +1,6 @@
 mod app;
 mod engine;
+mod menu;
 mod model;
 mod process;
 mod setup;

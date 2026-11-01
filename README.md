@@ -65,10 +65,11 @@ to download, then choose **Check again** in MacAi.
   title you renamed is never replaced.
 - Replies stream as they are generated. **Stop reply** cancels the local process;
   **Retry reply** retries a stopped or failed message.
-- The `...` menu renames or deletes the selected conversation. Deletion asks for
-  confirmation. Copy buttons copy messages; replies support Markdown and code blocks.
-- MacAi follows the macOS light or dark appearance by default. Choose
-  **... > Appearance > System, Light or Dark** to override it; the choice is saved.
+- Each conversation in the sidebar has a `...` button (shown on hover and on the
+  selected chat) to rename or delete it. The header's `...` menu does the same for the
+  selected conversation. Deletion asks for confirmation. Copy buttons copy messages; replies support Markdown and code blocks.
+- MacAi follows the macOS light or dark appearance by default. Open
+  **MacAi > Settings…** (Command+,) to choose System, Light or Dark; the choice is saved.
 - Drafts, conversation selection, messages, and model context are saved automatically.
 - You can browse other conversations while a reply is being written. Only one
   generation runs at a time.
