@@ -26,6 +26,10 @@ Intelligence enabled with its model already downloaded. This build targets Apple
 Silicon. An initial Apple model download or terms acceptance may need to happen
 before chatting; chatting afterward is offline.
 
+On macOS 27.2, `fm models` also checks Private Cloud Compute (`pcc`). MacAi
+only needs the on-device `system` model; `pcc` being unavailable does not block
+local chat.
+
 On first launch, MacAi checks Apple's CLI license status. If it has not been
 accepted, a setup window displays the current terms from `fm license --show`.
 Read them, tick the agreement checkbox, and choose **Accept and continue**.
