@@ -10,6 +10,63 @@ pub fn now() -> u64 {
         .as_secs()
 }
 
+/// The app's color theme. `System` follows the macOS appearance.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "System",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelChoice {
+    #[default]
+    #[serde(rename = "system")]
+    OnDevice,
+    #[serde(rename = "pcc")]
+    Cloud,
+}
+
+impl ModelChoice {
+    pub fn fm_name(self) -> &'static str {
+        match self {
+            Self::OnDevice => "system",
+            Self::Cloud => "pcc",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OnDevice => "On-device",
+            Self::Cloud => "Apple Cloud",
+        }
+    }
+}
+
+/// Where a chat's title came from, so a generated summary never replaces a user's rename.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    #[default]
+    Prompt,
+    Summary,
+    Custom,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -43,10 +100,19 @@ pub struct Chat {
     pub messages: Vec<Message>,
     // Keep Apple's opaque transcript intact, including its context metadata.
     pub transcript: Option<Value>,
+    // A saved transcript belongs to one model, so a started chat keeps its model.
+    #[serde(default)]
+    pub model: ModelChoice,
+    #[serde(default)]
+    pub title_source: TitleSource,
 }
 
 impl Chat {
     pub fn new() -> Self {
+        Self::with_model(ModelChoice::default())
+    }
+
+    pub fn with_model(model: ModelChoice) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             title: "New conversation".into(),
@@ -54,7 +120,40 @@ impl Chat {
             draft: String::new(),
             messages: Vec::new(),
             transcript: None,
+            model,
+            title_source: TitleSource::Prompt,
         }
+    }
+
+    /// The first completed exchange, used to summarize a title.
+    pub fn title_context(&self) -> Option<(&str, &str)> {
+        if self.title_source != TitleSource::Prompt {
+            return None;
+        }
+        let user = self.messages.iter().find(|m| m.role == Role::User)?;
+        let reply = self
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Assistant && m.status == MessageStatus::Complete)?;
+        Some((&user.text, &reply.text))
+    }
+
+    pub fn apply_summary_title(&mut self, title: String) -> bool {
+        if self.title_source != TitleSource::Prompt {
+            return false;
+        }
+        self.title = title;
+        self.title_source = TitleSource::Summary;
+        true
+    }
+
+    pub fn rename(&mut self, title: String) {
+        self.title = title;
+        self.title_source = TitleSource::Custom;
+    }
+
+    pub fn is_started(&self) -> bool {
+        !self.messages.is_empty() || self.transcript.is_some()
     }
 
     pub fn begin(&mut self, prompt: String) {
@@ -94,6 +193,31 @@ impl Chat {
         .then(|| user.text.clone())
     }
 
+    /// The prompt behind the latest reply when that reply repeats an earlier one word for
+    /// word (ignoring case and spacing), a sign the on-device model is stuck in a loop.
+    pub fn repeated_prompt(&self) -> Option<String> {
+        let [earlier @ .., user, reply] = self.messages.as_slice() else {
+            return None;
+        };
+        let normal = |text: &str| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let latest = normal(&reply.text);
+        (user.role == Role::User
+            && reply.role == Role::Assistant
+            && reply.status == MessageStatus::Complete
+            && !latest.is_empty()
+            && earlier.iter().any(|message| {
+                message.role == Role::Assistant
+                    && message.status == MessageStatus::Complete
+                    && normal(&message.text) == latest
+            }))
+        .then(|| user.text.clone())
+    }
+
     pub fn finish(&mut self, text: String, transcript: Value) {
         if let Some(message) = self.messages.last_mut() {
             message.text = text;
@@ -117,6 +241,10 @@ pub struct History {
     pub version: u32,
     pub selected: String,
     pub chats: Vec<Chat>,
+    #[serde(default)]
+    pub preferred_model: ModelChoice,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 impl Default for History {
@@ -126,6 +254,8 @@ impl Default for History {
             version: 1,
             selected: chat.id.clone(),
             chats: vec![chat],
+            preferred_model: ModelChoice::default(),
+            appearance: Appearance::default(),
         }
     }
 }
@@ -146,17 +276,44 @@ impl History {
     }
 
     pub fn new_chat(&mut self) {
+        let model = self.preferred_model;
         if let Some(empty) = self
             .chats
-            .iter()
-            .find(|chat| chat.messages.is_empty() && chat.draft.is_empty())
+            .iter_mut()
+            .find(|chat| !chat.is_started() && chat.draft.is_empty())
         {
+            empty.model = model;
             self.selected = empty.id.clone();
             return;
         }
-        let chat = Chat::new();
+        let chat = Chat::with_model(model);
         self.selected = chat.id.clone();
         self.chats.insert(0, chat);
+    }
+
+    /// Selects a model for the current chat. A started chat keeps its context with
+    /// its original model, so the switch continues in a fresh conversation and the
+    /// unsent draft moves along with it.
+    pub fn switch_model(&mut self, model: ModelChoice) {
+        self.preferred_model = model;
+        let chat = self.selected_mut();
+        if chat.model == model {
+            return;
+        }
+        if !chat.is_started() {
+            chat.model = model;
+            return;
+        }
+        let draft = std::mem::take(&mut chat.draft);
+        self.new_chat();
+        let chat = self.selected_mut();
+        chat.model = model;
+        if chat.draft.is_empty() {
+            chat.draft = draft;
+        } else if !draft.is_empty() {
+            chat.draft.push('\n');
+            chat.draft.push_str(&draft);
+        }
     }
 
     pub fn delete(&mut self, id: &str) {
@@ -230,5 +387,98 @@ mod tests {
         assert!(history.selected().messages.is_empty());
         history.new_chat();
         assert_eq!(history.chats.len(), 1);
+    }
+
+    #[test]
+    fn repeated_replies_are_detected_only_for_the_latest_turn() {
+        let mut chat = Chat::new();
+        chat.begin("how many params".into());
+        chat.finish(
+            "I have 154 billion parameters.".into(),
+            serde_json::json!({}),
+        );
+        assert_eq!(chat.repeated_prompt(), None);
+        chat.begin("name some colors".into());
+        chat.finish("Red, blue.".into(), serde_json::json!({}));
+        assert_eq!(chat.repeated_prompt(), None);
+        chat.begin("why repeat".into());
+        chat.finish(
+            "  i have 154 billion\nparameters. ".into(),
+            serde_json::json!({}),
+        );
+        assert_eq!(chat.repeated_prompt().as_deref(), Some("why repeat"));
+        chat.begin("again".into());
+        assert_eq!(chat.repeated_prompt(), None, "still streaming");
+        chat.interrupt(MessageStatus::Failed, "x".into());
+        assert_eq!(chat.repeated_prompt(), None);
+    }
+
+    #[test]
+    fn summary_titles_replace_prompt_titles_but_never_user_renames() {
+        let mut chat = Chat::new();
+        chat.begin("tell me everything about otters please".into());
+        assert!(chat.title_context().is_none(), "no completed reply yet");
+        chat.finish("Otters are...".into(), serde_json::json!({}));
+        assert_eq!(
+            chat.title_context(),
+            Some(("tell me everything about otters please", "Otters are..."))
+        );
+        assert!(chat.apply_summary_title("All About Otters".into()));
+        assert_eq!(chat.title, "All About Otters");
+        assert!(chat.title_context().is_none());
+
+        let mut renamed = Chat::new();
+        renamed.begin("Hello".into());
+        renamed.rename("My name".into());
+        renamed.finish("Hi".into(), serde_json::json!({}));
+        assert!(renamed.title_context().is_none());
+        assert!(!renamed.apply_summary_title("Greeting".into()));
+        assert_eq!(renamed.title, "My name");
+    }
+
+    #[test]
+    fn model_defaults_to_on_device_and_older_history_still_loads() {
+        assert_eq!(Chat::new().model, ModelChoice::OnDevice);
+        assert_eq!(ModelChoice::default().fm_name(), "system");
+        assert_eq!(ModelChoice::Cloud.fm_name(), "pcc");
+        let old = r#"{"version":1,"selected":"a","chats":[{"id":"a","title":"t","updated_at":0,"draft":"","messages":[],"transcript":null}]}"#;
+        let history: History = serde_json::from_str(old).unwrap();
+        assert_eq!(history.preferred_model, ModelChoice::OnDevice);
+        assert_eq!(history.selected().model, ModelChoice::OnDevice);
+        assert_eq!(history.selected().title_source, TitleSource::Prompt);
+        assert_eq!(history.appearance, Appearance::System);
+        let mut saved = serde_json::to_value(&history).unwrap();
+        saved["appearance"] = "dark".into();
+        let reopened: History = serde_json::from_value(saved).unwrap();
+        assert_eq!(reopened.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn switching_models_keeps_started_context_with_its_original_model() {
+        let mut history = History::default();
+        history.switch_model(ModelChoice::Cloud);
+        assert_eq!(history.chats.len(), 1);
+        assert_eq!(history.selected().model, ModelChoice::Cloud);
+
+        history.selected_mut().begin("Hello".into());
+        history
+            .selected_mut()
+            .finish("Hi".into(), serde_json::json!({"transcript": {}}));
+        let started = history.selected.clone();
+        history.selected_mut().draft = "Next question".into();
+        history.switch_model(ModelChoice::OnDevice);
+        assert_ne!(history.selected, started);
+        assert_eq!(history.selected().model, ModelChoice::OnDevice);
+        assert_eq!(history.selected().draft, "Next question");
+        let original = history
+            .chats
+            .iter()
+            .find(|chat| chat.id == started)
+            .unwrap();
+        assert_eq!(original.model, ModelChoice::Cloud);
+        assert!(original.draft.is_empty());
+        assert_eq!(history.preferred_model, ModelChoice::OnDevice);
+        history.new_chat();
+        assert_eq!(history.selected().model, ModelChoice::OnDevice);
     }
 }
