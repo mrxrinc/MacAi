@@ -36,9 +36,15 @@ impl LicenseDocument {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudStatus {
+    Available,
+    Unavailable(String),
+}
+
 #[derive(Debug)]
 pub enum Readiness {
-    Ready,
+    Ready(CloudStatus),
     LicenseRequired(LicenseDocument),
     ModelUnavailable(String),
 }
@@ -143,16 +149,38 @@ fn check_with(program: &Path, cancelled: &AtomicBool) -> Result<Readiness, Strin
         return license_document(program, cancelled).map(Readiness::LicenseRequired);
     }
     Ok(match check_model_with(program, cancelled) {
-        Ok(_) => Readiness::Ready,
+        Ok(cloud) => Readiness::Ready(cloud),
         Err(error) => Readiness::ModelUnavailable(error),
     })
 }
 
-fn check_model_with(program: &Path, cancelled: &AtomicBool) -> Result<(), String> {
+fn cloud_status(models: &str) -> CloudStatus {
+    for line in models.lines() {
+        let mut fields = line.split_whitespace();
+        let mark = fields.next();
+        if fields.next() != Some("pcc") {
+            continue;
+        }
+        if mark == Some("✓") {
+            return CloudStatus::Available;
+        }
+        let reason = fields.collect::<Vec<_>>().join(" ");
+        let reason = reason.trim_start_matches('(').trim_end_matches(')').trim();
+        return CloudStatus::Unavailable(if reason.is_empty() {
+            "Private Cloud Compute is not available on this Mac.".into()
+        } else {
+            reason.to_owned()
+        });
+    }
+    CloudStatus::Unavailable("This version of macOS does not offer Private Cloud Compute.".into())
+}
+
+fn check_model_with(program: &Path, cancelled: &AtomicBool) -> Result<CloudStatus, String> {
     let mut output = fm_command(program, &["models"], cancelled)?;
     if !output.status.success() && output.stderr.contains("Unknown command 'models'") {
         output = fm_command(program, &["available"], cancelled)?;
     }
+    let cloud = cloud_status(&output.stdout);
     let system_available = output.stdout.lines().any(|line| {
         let mut fields = line.split_whitespace();
         fields.next() == Some("✓") && fields.next() == Some("system")
@@ -160,7 +188,7 @@ fn check_model_with(program: &Path, cancelled: &AtomicBool) -> Result<(), String
     if system_available
         || (output.status.success() && output.stdout.trim() == "System model available")
     {
-        Ok(())
+        Ok(cloud)
     } else {
         Err(format!(
             "Apple Intelligence is not ready. Enable it in System Settings and let the model finish downloading, then choose Check again.\n\n{}",
@@ -319,7 +347,7 @@ esac
             fake_authorize(&program, doc, cancel)
         })
         .unwrap();
-        assert!(matches!(result, Readiness::Ready));
+        assert!(matches!(result, Readiness::Ready(_)));
         assert!(program.with_extension("accepted").exists());
     }
 
@@ -360,7 +388,7 @@ esac
             panic!("must not authorize")
         })
         .unwrap();
-        assert!(matches!(result, Readiness::Ready));
+        assert!(matches!(result, Readiness::Ready(_)));
     }
 
     #[test]
@@ -438,10 +466,28 @@ esac
         fs::write(program.with_extension("accepted"), "").unwrap();
         assert!(matches!(
             check_with(&program, &AtomicBool::new(false)).unwrap(),
-            Readiness::Ready
+            Readiness::Ready(_)
         ));
         let calls = fs::read_to_string(program.with_extension("calls")).unwrap();
         assert_eq!(calls, "license --status\nmodels\n");
+    }
+
+    #[test]
+    fn cloud_status_reports_apples_reason_or_availability() {
+        assert_eq!(
+            cloud_status("Apple Foundation Models\n  ✓ system (AFM 3 Core)\n  ✗ pcc                  (Private Cloud Compute is not available in this context. Please use the Terminal app.)\n"),
+            CloudStatus::Unavailable(
+                "Private Cloud Compute is not available in this context. Please use the Terminal app.".into()
+            )
+        );
+        assert_eq!(
+            cloud_status("  ✓ system (AFM 3 Core)\n  ✓ pcc\n"),
+            CloudStatus::Available
+        );
+        assert!(matches!(
+            cloud_status("System model available\n"),
+            CloudStatus::Unavailable(_)
+        ));
     }
 
     #[test]
@@ -451,7 +497,7 @@ esac
         fs::write(program.with_extension("legacy"), "").unwrap();
         assert!(matches!(
             check_with(&program, &AtomicBool::new(false)).unwrap(),
-            Readiness::Ready
+            Readiness::Ready(_)
         ));
         let calls = fs::read_to_string(program.with_extension("calls")).unwrap();
         assert_eq!(calls, "license --status\nmodels\navailable\n");

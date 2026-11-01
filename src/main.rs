@@ -10,8 +10,18 @@ fn main() -> eframe::Result<()> {
         match argument.as_str() {
             "--check" => {
                 match setup::check(&std::sync::atomic::AtomicBool::new(false)) {
-                    Ok(setup::Readiness::Ready) => {
-                        println!("System model available; Apple terms accepted.")
+                    Ok(setup::Readiness::Ready(cloud)) => {
+                        println!("System model available; Apple terms accepted.");
+                        match cloud {
+                            setup::CloudStatus::Available => {
+                                println!("Apple Cloud (Private Cloud Compute) available.")
+                            }
+                            setup::CloudStatus::Unavailable(reason) => {
+                                println!(
+                                    "Apple Cloud (Private Cloud Compute) unavailable: {reason}"
+                                )
+                            }
+                        }
                     }
                     Ok(setup::Readiness::LicenseRequired(_)) => {
                         eprintln!("Apple's terms have not been accepted. Open MacAi to review and accept them in the setup screen.");
@@ -29,7 +39,7 @@ fn main() -> eframe::Result<()> {
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!("MacAi - private, offline chat with Apple's on-device model\n\nUsage: MacAi [--check | --help]\n\nRun without arguments to open the chat window.\n--check  Check local model availability without opening a window.\n\nChats: ~/Library/Application Support/MacAi/history.json");
+                println!("MacAi - chat with Apple's Foundation Models (on-device by default, optional Apple Cloud)\n\nUsage: MacAi [--check | --help]\n\nRun without arguments to open the chat window.\n--check  Check model availability without opening a window.\n\nChats: ~/Library/Application Support/MacAi/history.json");
                 return Ok(());
             }
             _ => {

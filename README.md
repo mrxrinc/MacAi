@@ -1,7 +1,9 @@
 # MacAi
 
-A small, native macOS chat app for Apple's on-device Foundation Model. Written in
-Rust; no Python runtime, browser, web server, account, API key, or cloud service.
+A small, native macOS chat app for Apple's Foundation Models. It uses the
+on-device model by default and can optionally switch to Apple's Private Cloud
+Compute model. Written in Rust; no Python runtime, browser, web server, account,
+or API key.
 
 ## Run
 
@@ -24,11 +26,11 @@ If you used the earlier bare `MacAi` executable, quit that window first and use
 **Requires:** an Apple Intelligence-capable Mac, macOS 27 with `fm`, and Apple
 Intelligence enabled with its model already downloaded. This build targets Apple
 Silicon. An initial Apple model download or terms acceptance may need to happen
-before chatting; chatting afterward is offline.
+before chatting; on-device chatting afterward is offline.
 
 On macOS 27.2, `fm models` also checks Private Cloud Compute (`pcc`). MacAi
 only needs the on-device `system` model; `pcc` being unavailable does not block
-local chat.
+local chat. It only affects the optional **Apple Cloud** model (see below).
 
 On first launch, MacAi checks Apple's CLI license status. If it has not been
 accepted, a setup window displays the current terms from `fm license --show`.
@@ -55,18 +57,51 @@ to download, then choose **Check again** in MacAi.
 
 - Write a message and press **Enter** to send. **Shift+Enter** adds a new line.
 - **Command+N** starts a conversation. Use the sidebar to search and reopen history.
+  The chevron at the top left hides or shows the sidebar.
+- After a conversation's first reply, MacAi asks the on-device model in the
+  background for a short 3-6 word title. It runs as a separate `fm respond` call
+  without the conversation's transcript, so the chat's context is untouched. The
+  first message stays as the title until the summary arrives or if it fails, and a
+  title you renamed is never replaced.
 - Replies stream as they are generated. **Stop reply** cancels the local process;
   **Retry reply** retries a stopped or failed message.
 - The `...` menu renames or deletes the selected conversation. Deletion asks for
   confirmation. Copy buttons copy messages; replies support Markdown and code blocks.
+- MacAi follows the macOS light or dark appearance by default. Choose
+  **... > Appearance > System, Light or Dark** to override it; the choice is saved.
 - Drafts, conversation selection, messages, and model context are saved automatically.
 - You can browse other conversations while a reply is being written. Only one
   generation runs at a time.
+- Chats use the on-device model (`fm --model system`). MacAi also supports
+  Apple Cloud, but its switch is hidden for now because Apple only allows Private
+  Cloud Compute from Terminal (see below). When it is shown again, the
+  **On-device / Apple Cloud** switch under the message box chooses the model. Apple Cloud uses Apple's
+  Private Cloud Compute (`fm --model pcc`) and needs internet. MacAi remembers your
+  choice for new conversations. A conversation's context belongs to the model that
+  started it, so switching models in a conversation that already has messages
+  starts a fresh conversation and moves your unsent draft into it.
+- Apple currently reports Private Cloud Compute as *"not available in this context.
+  Please use the Terminal app."* for apps other than Terminal. When that happens,
+  MacAi hides the Apple Cloud switch and its notice (the code is commented out in
+  `src/app.rs`, ready to re-enable) and keeps everything on-device. Conversations
+  saved on Apple Cloud stay readable; sending in one continues in a new on-device
+  conversation.
+- To keep Apple's small on-device model focused, MacAi sends it only the 6 most
+  recent exchanges (plus any instructions) when a conversation continues. The full
+  conversation stays saved and visible.
+- In longer chats the on-device model can get stuck repeating an earlier answer.
+  When a reply matches an earlier one word for word, MacAi shows a notice offering
+  **Answer without earlier context** (asks again from a clean slate, replacing the
+  repeated reply) or **Start new chat with this question**.
 - **MacAi > About MacAi** shows the creator credit and a clickable GitHub profile link.
 
 ## Privacy and storage
 
-MacAi invokes `fm respond --model system` directly, passing prompts through stdin.
+MacAi invokes `fm respond --model system` (or `--model pcc` for Apple Cloud)
+directly, passing prompts through stdin. Like running `fm respond` in Terminal,
+it adds no extra system instructions, so replies match what the terminal gives
+you. On-device chats stay on your Mac; Apple Cloud chats are processed by Apple's
+Private Cloud Compute.
 It uses `--resume` and `--save-transcript` to retain the same model context between
 turns and app launches. There is no network listener, telemetry, remote image
 fetching, or automatic link opening.
